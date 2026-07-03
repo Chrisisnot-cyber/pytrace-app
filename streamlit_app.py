@@ -187,7 +187,7 @@ def get_changed_variables(current_vars, previous_vars):
 def get_gemini_hint(line_code, learner_answer, correct_answer, prompt_text):
     """Call Gemini to generate a scaffolded hint for an incorrect answer."""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         system_prompt = f"""            You are a patient Python tutor helping a product manager learn to trace code.
 The learner is tracing this line of code:
 ```python
