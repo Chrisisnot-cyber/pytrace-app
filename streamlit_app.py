@@ -1,4 +1,6 @@
 
+import json
+import textwrap
 import streamlit as st
 import datetime
 import google.generativeai as genai
@@ -88,11 +90,104 @@ if "trace_attempts" not in st.session_state:
 if "hint_shown" not in st.session_state:
     st.session_state.hint_shown = False
 
+TRACKED_VARS = ["posts", "results", "post", "ctr", "top"]
+MAX_COMPACT_VALUE_LEN = 80
+
+
+def _script_code_up_to_line(end_line):
+    return "\n".join(
+        code for lineno, code in SCRIPT_LINES
+        if lineno <= end_line and code.strip()
+    )
+
+
+def _user_vars(namespace):
+    return {k: v for k, v in namespace.items() if not k.startswith("__")}
+
+
+def execute_until_line(end_line, loop_iterations=None):
+    """Execute the traced script up to end_line and return user-defined variables."""
+    namespace = {"__builtins__": __builtins__}
+    loop_start = 8
+
+    if end_line >= loop_start and loop_iterations is not None:
+        exec(_script_code_up_to_line(loop_start - 1), namespace)
+        body_code = textwrap.dedent("\n".join(
+            code for lineno, code in SCRIPT_LINES
+            if loop_start < lineno <= end_line and code.strip()
+        ))
+        for i, post in enumerate(namespace["posts"]):
+            if i >= loop_iterations:
+                break
+            namespace["post"] = post
+            exec(body_code, namespace)
+        return _user_vars(namespace)
+
+    if end_line == 1:
+        end_line = 5
+
+    max_line = max(lineno for lineno, _ in SCRIPT_LINES)
+    for try_through in range(end_line, max_line + 1):
+        code = _script_code_up_to_line(try_through)
+        try:
+            compile(code, "<pytrace>", "exec")
+        except SyntaxError:
+            continue
+        exec(code, namespace)
+        break
+
+    return _user_vars(namespace)
+
+
+def get_variables_for_trace_step(step_index):
+    """Return variable values at the pedagogical checkpoint for a trace step."""
+    if step_index >= len(TRACE_STEPS):
+        return execute_until_line(13)
+
+    line = TRACE_STEPS[step_index]["line"]
+    if line == 9:
+        return execute_until_line(9, loop_iterations=1)
+    if line == 1:
+        return execute_until_line(5)
+    return execute_until_line(line)
+
+
+def format_variable_for_display(value, max_compact_len=MAX_COMPACT_VALUE_LEN):
+    """Format a Python value for the tracker table; return (compact, full_or_none)."""
+    if isinstance(value, float):
+        return str(round(value, 2)), None
+
+    if isinstance(value, (list, dict)):
+        compact = json.dumps(value, separators=(",", ":"))
+        if len(compact) <= max_compact_len:
+            return compact, None
+        if isinstance(value, list):
+            summary = f"list with {len(value)} items"
+        else:
+            summary = f"dict with {len(value)} keys"
+        return summary, json.dumps(value, indent=2)
+
+    val_str = repr(value)
+    if len(val_str) <= max_compact_len:
+        return val_str, None
+    return val_str[:max_compact_len] + "...", val_str
+
+
+def get_changed_variables(current_vars, previous_vars):
+    changed = []
+    for name in TRACKED_VARS:
+        if name in current_vars and (
+            name not in previous_vars or previous_vars[name] != current_vars[name]
+        ):
+            changed.append(name)
+    return changed
+
+
 # ── Helper: call Gemini for hint ──────────────────────────────────────────────
 def get_gemini_hint(line_code, learner_answer, correct_answer, prompt_text):
     """Call Gemini to generate a scaffolded hint for an incorrect answer."""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
         system_prompt = f"""            You are a patient Python tutor helping a product manager learn to trace code.
 The learner is tracing this line of code:
 ```python
@@ -230,33 +325,40 @@ elif st.session_state.phase == "trace":
     st.markdown("Now let's trace through the code line by line to verify.")
     st.divider()
 
-    # Pre-populated variable table ──────────────────────────────────────────
+    # Dynamic variable state tracker ────────────────────────────────────────
     st.markdown("### 📊 Variable state tracker")
     st.caption("As we trace, we'll track what each variable holds at each step.")
-    # Hardcoded variable states for each line (simple demo approach)
-    VARIABLE_STATES = {
-        1: {"posts": "[]", "results": "—", "post": "—", "ctr": "—", "top": "—"},
-        7: {"posts": "[3 dictionaries]", "results": "[]", "post": "—", "ctr": "—", "top": "—"},
-        9: {"posts": "[3 dictionaries]", "results": "[]", "post": "{'title': 'How I hit 1M upvotes', ...}", "ctr": "—", "top": "—"},
-    }
-    
-    # Get current line from session state, default to 1
-    current_line = st.session_state.get("trace_step", 0) + 1
-    line_num = TRACE_STEPS[current_line - 1]["line"] if current_line <= len(TRACE_STEPS) else 1
-    
-    # Get variable state for current line (default to line 1 if not in map)
-    var_state = VARIABLE_STATES.get(line_num, VARIABLE_STATES[1])
-    
-    var_table_data = [
-        {"Variable": "posts", "Current Value": var_state["posts"]},
-        {"Variable": "results", "Current Value": var_state["results"]},
-        {"Variable": "post", "Current Value": var_state["post"]},
-        {"Variable": "ctr", "Current Value": var_state["ctr"]},
-        {"Variable": "top", "Current Value": var_state["top"]},
-    ]
-    st.table(var_table_data)
-    # Step-by-step prediction ───────────────────────────────────────────────
+
     current_step = st.session_state.trace_step
+    current_vars = get_variables_for_trace_step(current_step)
+    previous_vars = (
+        get_variables_for_trace_step(current_step - 1) if current_step > 0 else {}
+    )
+    changed_vars = get_changed_variables(current_vars, previous_vars)
+    if changed_vars:
+        st.caption(f"Changed since last step: {', '.join(changed_vars)}")
+
+    var_table_data = []
+    expanders = []
+    for var_name in TRACKED_VARS:
+        if var_name in current_vars:
+            compact, full = format_variable_for_display(current_vars[var_name])
+            display_value = compact
+            if var_name in changed_vars:
+                display_value = f"→ {compact}"
+            var_table_data.append({"Variable": var_name, "Current Value": display_value})
+            if full:
+                expanders.append((var_name, full))
+        else:
+            var_table_data.append(
+                {"Variable": var_name, "Current Value": "not yet defined"}
+            )
+
+    st.table(var_table_data)
+    for var_name, full_value in expanders:
+        with st.expander(f"Full value of `{var_name}`"):
+            st.code(full_value, language="json")
+    # Step-by-step prediction ───────────────────────────────────────────────
     if current_step < len(TRACE_STEPS):
         step = TRACE_STEPS[current_step]
         st.markdown(f"### Line {step['line']}")
