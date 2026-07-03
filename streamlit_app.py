@@ -92,9 +92,9 @@ if "hint_shown" not in st.session_state:
 def get_gemini_hint(line_code, learner_answer, correct_answer, prompt_text):
     """Call Gemini to generate a scaffolded hint for an incorrect answer."""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        system_prompt = f"""
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
 You are a patient Python tutor helping a product manager learn to trace code.
+            system_prompt = f"""
 The learner is tracing this line of code:
 ```python
 {line_code}
@@ -235,7 +235,7 @@ elif st.session_state.phase == "trace":
     st.markdown("### 📊 Variable state tracker")
     st.caption("As we trace, we'll track what each variable holds at each step.")
     var_table_data = [
-        {"Variable": "posts", "Current Value": "—"},
+        {"Variable": "posts", "Current Value": "[]"
         {"Variable": "results", "Current Value": "—"},
         {"Variable": "post", "Current Value": "—"},
         {"Variable": "ctr", "Current Value": "—"},
