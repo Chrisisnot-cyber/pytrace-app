@@ -234,7 +234,7 @@ elif st.session_state.phase == "trace":
     st.markdown("### 📊 Variable state tracker")
     st.caption("As we trace, we'll track what each variable holds at each step.")
     var_table_data = [
-        {"Variable": "posts", "Current Value": "[]"
+        {"Variable": "posts", "Current Value": "[]",
         {"Variable": "results", "Current Value": "—"},
         {"Variable": "post", "Current Value": "—"},
         {"Variable": "ctr", "Current Value": "—"},
