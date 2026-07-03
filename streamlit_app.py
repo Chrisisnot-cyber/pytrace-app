@@ -233,16 +233,28 @@ elif st.session_state.phase == "trace":
     # Pre-populated variable table ──────────────────────────────────────────
     st.markdown("### 📊 Variable state tracker")
     st.caption("As we trace, we'll track what each variable holds at each step.")
+    # Hardcoded variable states for each line (simple demo approach)
+    VARIABLE_STATES = {
+        1: {"posts": "[]", "results": "—", "post": "—", "ctr": "—", "top": "—"},
+        7: {"posts": "[3 dictionaries]", "results": "[]", "post": "—", "ctr": "—", "top": "—"},
+        9: {"posts": "[3 dictionaries]", "results": "[]", "post": "{'title': 'How I hit 1M upvotes', ...}", "ctr": "—", "top": "—"},
+    }
+    
+    # Get current line from session state, default to 1
+    current_line = st.session_state.get("current_step", 0) + 1
+    line_num = TRACE_STEPS[current_line - 1]["line"] if current_line <= len(TRACE_STEPS) else 1
+    
+    # Get variable state for current line (default to line 1 if not in map)
+    var_state = VARIABLE_STATES.get(line_num, VARIABLE_STATES[1])
+    
     var_table_data = [
-        {"Variable": "posts", "Current Value": "[]"},
-        {"Variable": "results", "Current Value": "—"},
-        {"Variable": "post", "Current Value": "—"},
-        {"Variable": "ctr", "Current Value": "—"},
-        {"Variable": "top", "Current Value": "—"},
+        {"Variable": "posts", "Current Value": var_state["posts"]},
+        {"Variable": "results", "Current Value": var_state["results"]},
+        {"Variable": "post", "Current Value": var_state["post"]},
+        {"Variable": "ctr", "Current Value": var_state["ctr"]},
+        {"Variable": "top", "Current Value": var_state["top"]},
     ]
     st.table(var_table_data)
-    st.divider()
-
     # Step-by-step prediction ───────────────────────────────────────────────
     current_step = st.session_state.trace_step
     if current_step < len(TRACE_STEPS):
