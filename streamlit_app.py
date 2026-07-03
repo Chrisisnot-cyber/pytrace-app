@@ -241,7 +241,7 @@ elif st.session_state.phase == "trace":
     }
     
     # Get current line from session state, default to 1
-    current_line = st.session_state.get("current_step", 0) + 1
+    current_line = st.session_state.get("trace_step", 0) + 1
     line_num = TRACE_STEPS[current_line - 1]["line"] if current_line <= len(TRACE_STEPS) else 1
     
     # Get variable state for current line (default to line 1 if not in map)
