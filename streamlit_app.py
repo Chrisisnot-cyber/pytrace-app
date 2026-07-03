@@ -1,5 +1,6 @@
 import streamlit as st
 import datetime
+import google.generativeai as genai
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -7,6 +8,12 @@ st.set_page_config(
     page_icon="🔍",
     layout="centered",
 )
+
+# ── Gemini API setup ──────────────────────────────────────────────────────────
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+else:
+    st.error("GEMINI_API_KEY not found in secrets. AI hints will not work.")
 
 # ── Module 1 script (CTR calculation) ─────────────────────────────────────────
 SCRIPT_LINES = [
@@ -35,14 +42,33 @@ SCRIPT_ANNOTATIONS = {
     13: "📣 Print the result",
 }
 
-# ── Multiple-choice prediction options ────────────────────────────────────────
-# Three plausible interpretations — no wrong answers label in the UI.
-# A = fully correct  B = partially correct  C = reasonable misconception
+# ── Trace steps (line, variable to predict, correct answer, hint context) ─────
+TRACE_STEPS = [
+    {
+        "line": 1,
+        "prompt": "After line 1 runs, what is the value of `posts`?",
+        "answer": "a list of 3 dictionaries",
+        "check": lambda v: "list" in v.lower() and "3" in v,
+    },
+    {
+        "line": 7,
+        "prompt": "After line 7 runs, what is the value of `results`?",
+        "answer": "an empty list []",
+        "check": lambda v: "empty" in v.lower() or "[]" in v,
+    },
+    {
+        "line": 9,
+        "prompt": "In the first loop iteration (post 'How I hit 1M upvotes'), what is `ctr` after line 9?",
+        "answer": "6.4",
+        "check": lambda v: "6.4" in v or "6.40" in v,
+    },
+]
+
 PREDICTION_OPTIONS = [
     "A — It prints the post title and its CTR percentage, e.g. 'Top post: How I hit 1M upvotes — CTR 6.4%'",
     "B — It prints a list of all three posts ranked by CTR",
     "C — It prints the raw number of clicks for the most-clicked post",
-    "D — I\'m not sure yet — I need to trace through the code first",
+    "D — I'm not sure yet — I need to trace through the code first",
 ]
 
 # ── Session state initialisation ──────────────────────────────────────────────
@@ -54,8 +80,39 @@ if "start_time" not in st.session_state:
     st.session_state.start_time = None
 if "prediction" not in st.session_state:
     st.session_state.prediction = None
+if "trace_step" not in st.session_state:
+    st.session_state.trace_step = 0  # current step index
+if "trace_attempts" not in st.session_state:
+    st.session_state.trace_attempts = []  # history of attempts
+if "hint_shown" not in st.session_state:
+    st.session_state.hint_shown = False
 
-# ── PHASE: IDENTIFY ───────────────────────────────────────────────────────────
+# ── Helper: call Gemini for hint ──────────────────────────────────────────────
+def get_gemini_hint(line_code, learner_answer, correct_answer, prompt_text):
+    """Call Gemini to generate a scaffolded hint for an incorrect answer."""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        system_prompt = f"""
+You are a patient Python tutor helping a product manager learn to trace code.
+The learner is tracing this line of code:
+```python
+{line_code}
+```
+
+Question: {prompt_text}
+Learner's answer: "{learner_answer}"
+Correct answer: {correct_answer}
+
+Provide a short, scaffolded hint (1-2 sentences) that guides them toward the right answer WITHOUT giving it away directly. Use the Graesser escalation approach: start with a pump ("What do you think happens to X here?"), then a directional hint if needed.
+"""
+        response = model.generate_content(system_prompt)
+        return response.text.strip()
+    except Exception as e:
+        return f"⚠️ Could not generate hint (API error: {str(e)}). Try again or ask for help."
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE: IDENTIFY
+# ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.phase == "identify":
     st.title("🔍 PyTrace")
     st.subheader("Learn to read Python — one line at a time")
@@ -84,7 +141,9 @@ if st.session_state.phase == "identify":
             st.session_state.phase = "orient"
             st.rerun()
 
-# ── PHASE: ORIENT ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE: ORIENT
+# ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.phase == "orient":
     learner = st.session_state.learner
     st.title("🔍 PyTrace — Module 1")
@@ -157,17 +216,102 @@ elif st.session_state.phase == "orient":
     if btn_disabled:
         st.caption("↑ Select an option above to continue.")
 
-# ── PHASE: TRACE (placeholder — coming next) ──────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE: TRACE
+# ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.phase == "trace":
     st.title("🔍 PyTrace — Module 1")
     st.caption(f"Step 2 of 4 · Trace  ·  Learner: {st.session_state.learner}")
     st.divider()
-    st.markdown(f"""
-    **Your prediction was captured:**  
-    > {st.session_state.prediction}
 
-    The Trace phase is coming in the next build.
-    """)
-    if st.button("← Back to Orient"):
-        st.session_state.phase = "orient"
+    # Show their Orient prediction as context ──────────────────────────────
+    st.markdown("**Your prediction from Orient:**")
+    st.info(st.session_state.prediction)
+    st.markdown("Now let's trace through the code line by line to verify.")
+    st.divider()
+
+    # Pre-populated variable table ──────────────────────────────────────────
+    st.markdown("### 📊 Variable state tracker")
+    st.caption("As we trace, we'll track what each variable holds at each step.")
+    var_table_data = [
+        {"Variable": "posts", "Current Value": "—"},
+        {"Variable": "results", "Current Value": "—"},
+        {"Variable": "post", "Current Value": "—"},
+        {"Variable": "ctr", "Current Value": "—"},
+        {"Variable": "top", "Current Value": "—"},
+    ]
+    st.table(var_table_data)
+    st.divider()
+
+    # Step-by-step prediction ───────────────────────────────────────────────
+    current_step = st.session_state.trace_step
+    if current_step < len(TRACE_STEPS):
+        step = TRACE_STEPS[current_step]
+        st.markdown(f"### Line {step['line']}")
+        st.code(SCRIPT_LINES[step['line'] - 1][1], language="python")
+        st.markdown(step['prompt'])
+
+        # Input form ────────────────────────────────────────────────────────
+        answer = st.text_input("Your answer:", key=f"answer_{current_step}")
+
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("Submit", type="primary", use_container_width=True):
+                if not answer.strip():
+                    st.warning("Please enter an answer.")
+                else:
+                    is_correct = step['check'](answer)
+                    if is_correct:
+                        st.success(f"✓ Correct! The answer is: {step['answer']}")
+                        st.session_state.trace_step += 1
+                        st.session_state.hint_shown = False
+                        st.session_state.trace_attempts.append({
+                            "step": current_step,
+                            "answer": answer,
+                            "correct": True,
+                        })
+                        st.rerun()
+                    else:
+                        # INCORRECT — call Gemini for hint ─────────────────
+                        st.error("✗ Not quite. Let's get a hint.")
+                        hint = get_gemini_hint(
+                            SCRIPT_LINES[step['line'] - 1][1],
+                            answer,
+                            step['answer'],
+                            step['prompt'],
+                        )
+                        st.info(f"💡 Hint: {hint}")
+                        st.session_state.hint_shown = True
+                        st.session_state.trace_attempts.append({
+                            "step": current_step,
+                            "answer": answer,
+                            "correct": False,
+                        })
+    else:
+        # All steps complete ────────────────────────────────────────────────
+        st.success("🎉 You've completed the trace!")
+        st.markdown(
+            "You've walked through the entire script. Now you know "
+            "exactly what it does — and you can verify your original prediction."
+        )
+        if st.button("Continue to Summary"):
+            st.session_state.phase = "summary"
+            st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE: SUMMARY (placeholder)
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.phase == "summary":
+    st.title("🔍 PyTrace — Module 1")
+    st.caption(f"Step 4 of 4 · Summary  ·  Learner: {st.session_state.learner}")
+    st.divider()
+    st.markdown(
+        """
+        **Session complete!**
+
+        Summary and CSV download will be built in the next increment.
+        """
+    )
+    if st.button("← Back to Trace"):
+        st.session_state.phase = "trace"
         st.rerun()
